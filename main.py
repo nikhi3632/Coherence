@@ -76,7 +76,17 @@ async def run_stream():
 
     async with websockets.serve(handle_client, "localhost", 8765):
         print("WebSocket server started on ws://localhost:8765")
-        await listener.run()
+        print("Press Ctrl+C to stop gracefully...\n")
+        try:
+            await listener.run()
+        except asyncio.CancelledError:
+            print("\n[SHUTDOWN] Received interrupt, flushing remaining buffer...")
+            listener.stop()
+            # Final flush happens in listener.run() when _running becomes False
+            # But since we're cancelled, do it manually here
+            if listener.buffer:
+                await listener._flush()
+            print("[SHUTDOWN] Graceful shutdown complete.")
 
 
 # --- Entry Point ---

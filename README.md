@@ -89,8 +89,11 @@ python main.py stream
 
 **Terminal 2 — Send events:**
 ```bash
-python test_ws_client.py
+python test_ws_client.py         # Run all test scenarios once
+python test_ws_client.py loop    # Continuous loop (Ctrl+C to stop)
 ```
+
+Both server and client support **graceful shutdown** — press `Ctrl+C` to stop cleanly. The server will flush any remaining buffered events before exiting.
 
 Or send events manually:
 ```python
@@ -113,8 +116,8 @@ coherence-task/
 ├── integrationBoundary.py  # Hard boundary with validation + invariants
 ├── streamListener.py       # Real-time: buffer, backpressure, retry, hooks
 ├── events_types.json       # Classification rules
-├── test.py                 # 13 tests (Part 1 + Part 2)
-├── test_ws_client.py       # Manual WebSocket test client
+├── test.py                 # 13 unit tests (Part 1 + Part 2)
+├── test_ws_client.py       # WebSocket test client with 10 scenarios
 ├── requirements.txt        # Dependencies
 └── documentations/
     └── SPEC.md             # Original specification
@@ -171,6 +174,7 @@ The `IngestionRoutingBoundary` guarantees:
 | **Backpressure** | Queue blocks when full (`max_queue_size`: 100) |
 | **Retry** | Retries `max_retries` times (default: 2) before dropping |
 | **Hooks** | Extension points for future modules |
+| **Graceful Shutdown** | `Ctrl+C` flushes remaining buffer before exit |
 
 ## Extension Points
 
@@ -189,6 +193,23 @@ listener.on_post_flush = lambda batch: summarize(batch)
 # Called when batch dropped after max retries
 listener.on_error = lambda batch, err: log_failure(batch, err)
 ```
+
+## WebSocket Test Scenarios
+
+The `test_ws_client.py` includes 10 test scenarios that exercise different aspects of the system:
+
+| Scenario | What it Tests |
+|----------|---------------|
+| Happy Path - Mixed Sources | Valid events from slack, email, system |
+| All Event Types | One of each classification type |
+| Burst - Trigger Buffer Flush | 12 events to hit flush_threshold |
+| Team Updates Only | Multiple team_update keywords |
+| External Communications | Email-based external_comm events |
+| System Alerts | Error/alert/timeout/failed keywords |
+| Batch Send | JSON array (tests batch parsing) |
+| Rapid Fire | 20 events at 50ms (backpressure test) |
+| Misc/Unclassified | Events that fall through to misc |
+| Large Text Payload | Longer text content |
 
 ## Linting
 
