@@ -1,0 +1,12 @@
+{
+  "team_update": {
+    "keywords": ["team update", "deadline", "sprint", "review", "standup"]
+  },
+  "external_comm": {
+    "sources": ["email"],
+    "keywords": ["client", "customer", "partner"]
+  },
+  "system_alert": {
+    "keywords": ["error", "alert", "timeout", "failed"]
+  }
+}
