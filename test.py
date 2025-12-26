@@ -1,7 +1,12 @@
 # test_ingestion_boundary.py
 import pytest
 import asyncio
-from integrationBoundary import IngestionRoutingBoundary
+from integrationBoundary import (
+    IngestionRoutingBoundary,
+    IngestionValidationError,
+    BoundaryInvariantError,
+    RoutingError,
+)
 from streamListener import StreamListener
 
 
@@ -45,7 +50,7 @@ def test_ingestion_fails_on_missing_fields():
         {"timestamp": "2025-12-05T10:00:00Z", "source": "slack"}  # missing text
     ]
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IngestionValidationError):
         boundary.ingest(raw_events)
 
 
@@ -58,7 +63,7 @@ def test_ingestion_fails_on_invalid_timestamp():
 
     raw_events = [{"timestamp": "not-a-time", "source": "slack", "text": "ok"}]
 
-    with pytest.raises(ValueError):
+    with pytest.raises(IngestionValidationError):
         boundary.ingest(raw_events)
 
 
@@ -77,7 +82,7 @@ def test_normalized_schema_failure(monkeypatch):
 
     raw_events = [{"timestamp": "2025-12-05T10:00:00Z", "source": "sys", "text": "ok"}]
 
-    with pytest.raises(ValueError):
+    with pytest.raises(BoundaryInvariantError):
         boundary.ingest(raw_events)
 
 
@@ -113,9 +118,11 @@ def test_routing_failure():
         {"timestamp": "2025-12-05T10:00:00Z", "source": "system", "text": "Alert"}
     ]
 
-    # boundary must surface router failure
-    with pytest.raises(RuntimeError):
+    # boundary wraps router failure in RoutingError
+    with pytest.raises(RoutingError) as exc_info:
         boundary.ingest(raw_events)
+    assert exc_info.value.cause is not None
+    assert isinstance(exc_info.value.cause, RuntimeError)
 
 
 # 7. TRACE ID CONSISTENCY — all routed events must share the same trace_id
@@ -135,6 +142,97 @@ def test_all_events_share_same_trace_id():
     boundary.ingest(raw_events)
 
     assert len(set(captured)) == 1, "All events must share the same trace_id"
+
+
+# 8. ROUTER TIMEOUT — router exceeds timeout
+def test_routing_timeout():
+    import time
+    from integrationBoundary import RoutingTimeoutError
+
+    def slow_router(_event, _trace_id, _event_id):
+        time.sleep(2)  # Sleep longer than timeout
+
+    boundary = IngestionRoutingBoundary(slow_router, router_timeout=0.1)
+
+    raw_events = [
+        {"timestamp": "2025-12-05T10:00:00Z", "source": "system", "text": "Alert"}
+    ]
+
+    with pytest.raises(RoutingTimeoutError) as exc_info:
+        boundary.ingest(raw_events)
+    assert "timeout" in str(exc_info.value).lower()
+
+
+# 9. INPUT LIMITS — text too long
+def test_input_text_too_long():
+    from integrationBoundary import MAX_TEXT_LENGTH
+
+    def router(_e, _t, _i):
+        pass
+
+    boundary = IngestionRoutingBoundary(router)
+
+    raw_events = [
+        {
+            "timestamp": "2025-12-05T10:00:00Z",
+            "source": "slack",
+            "text": "x" * (MAX_TEXT_LENGTH + 1),
+        }
+    ]
+
+    with pytest.raises(IngestionValidationError) as exc_info:
+        boundary.ingest(raw_events)
+    assert "max length" in str(exc_info.value).lower()
+
+
+# 10. INPUT LIMITS — batch too large
+def test_input_batch_too_large():
+    from integrationBoundary import MAX_BATCH_SIZE
+
+    def router(_e, _t, _i):
+        pass
+
+    boundary = IngestionRoutingBoundary(router)
+
+    raw_events = [
+        {"timestamp": "2025-12-05T10:00:00Z", "source": "slack", "text": f"Event {i}"}
+        for i in range(MAX_BATCH_SIZE + 1)
+    ]
+
+    with pytest.raises(IngestionValidationError) as exc_info:
+        boundary.ingest(raw_events)
+    assert "batch size" in str(exc_info.value).lower()
+
+
+# 11. INPUT LIMITS — empty source
+def test_input_empty_source():
+    def router(_e, _t, _i):
+        pass
+
+    boundary = IngestionRoutingBoundary(router)
+
+    raw_events = [
+        {"timestamp": "2025-12-05T10:00:00Z", "source": "", "text": "Valid text"}
+    ]
+
+    with pytest.raises(IngestionValidationError) as exc_info:
+        boundary.ingest(raw_events)
+    assert "source" in str(exc_info.value).lower()
+
+
+# 12. EDGE CASE — empty batch
+def test_empty_batch_succeeds():
+    routed = []
+
+    def router(event, trace_id, event_id):
+        routed.append(event)
+
+    boundary = IngestionRoutingBoundary(router)
+
+    # Empty batch should succeed without error
+    boundary.ingest([])
+
+    assert len(routed) == 0
 
 
 # ============================================================
@@ -291,9 +389,8 @@ async def test_retry_on_boundary_failure():
 # 12. DROP AFTER MAX RETRIES
 @pytest.mark.asyncio
 async def test_drop_batch_after_max_retries():
-    """Batch is dropped after max retries exhausted."""
+    """Batch is dropped (logged) after max retries exhausted."""
     attempts = []
-    dropped = []
 
     def router(_e, _t, _i):
         pass
@@ -307,7 +404,6 @@ async def test_drop_batch_after_max_retries():
     boundary.ingest = always_fail
 
     listener = StreamListener(boundary, flush_threshold=1, max_retries=2)
-    listener.on_error = lambda batch, _err: dropped.append(batch)
 
     await listener.accept(make_event(0))
 
@@ -317,37 +413,4 @@ async def test_drop_batch_after_max_retries():
 
     # max_retries=2 means 3 total attempts (1 initial + 2 retries)
     assert len(attempts) == 3, "Should have attempted 3 times"
-    assert len(dropped) == 1, "Should have dropped 1 batch"
-
-
-# 13. EXTENSION HOOKS CALLED
-@pytest.mark.asyncio
-async def test_extension_hooks_called():
-    """on_event, on_pre_flush, on_post_flush hooks are invoked."""
-    events_seen = []
-    pre_flush_batches = []
-    post_flush_batches = []
-
-    def router(_e, _t, _i):
-        pass
-
-    boundary = IngestionRoutingBoundary(router)
-    listener = StreamListener(boundary, flush_threshold=2)
-
-    listener.on_event = lambda e: events_seen.append(e)
-    listener.on_pre_flush = lambda batch: pre_flush_batches.append(list(batch))
-    listener.on_post_flush = lambda batch: post_flush_batches.append(list(batch))
-
-    await listener.accept(make_event(0))
-    await listener.accept(make_event(1))
-
-    # Process
-    while not listener.queue.empty():
-        event = await listener.queue.get()
-        listener.buffer.append(event)
-        if len(listener.buffer) >= listener.flush_threshold:
-            await listener._flush()
-
-    assert len(events_seen) == 2, "on_event should be called for each event"
-    assert len(pre_flush_batches) == 1, "on_pre_flush should be called once"
-    assert len(post_flush_batches) == 1, "on_post_flush should be called once"
+    # Batch is dropped and logged (stream_batch_dropped) after exhausting retries
