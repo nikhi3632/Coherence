@@ -25,11 +25,11 @@ def router(event: dict, trace_id: str, event_id: str):
     )
 
 
-# --- Batch Mode (Part 1) ---
+# --- Batch Demo (for quick testing without WebSocket) ---
 
 
 def run_batch():
-    """Run with hardcoded test events (original Part 1 behavior)."""
+    """Run with hardcoded test events for quick demo/testing."""
     test_events = [
         {
             "timestamp": "2025-12-05T08:10:00Z",
@@ -51,11 +51,11 @@ def run_batch():
     boundary.ingest(test_events)
 
 
-# --- Stream Mode (Part 2) ---
+# --- Stream Server (default mode) ---
 
 
 async def run_stream():
-    """Run real-time stream listener with WebSocket input."""
+    """Run real-time stream server with WebSocket input. This is the primary mode."""
     try:
         import websockets
     except ImportError:
@@ -92,12 +92,14 @@ async def run_stream():
 # --- Entry Point ---
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "batch"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "stream"
 
-    if mode == "stream":
-        asyncio.run(run_stream())
-    else:
+    if mode == "batch":
+        # Quick demo mode for testing without WebSocket
         run_batch()
+    else:
+        # Default: start stream server
+        asyncio.run(run_stream())
 
 
 # Expected Output

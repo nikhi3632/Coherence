@@ -6,20 +6,32 @@ Provides real-time event ingestion with:
 - Buffering with flush threshold and timeout
 - Backpressure via bounded queue
 - Retry on failure with graceful degradation
-- Extension hooks for future modules (drift-detection, coherence scoring)
+- Graceful shutdown with buffer flush
+
+This module feeds into IngestionRoutingBoundary — it is not a parallel path.
 """
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional
 
 
-def _log(stage: str, meta: Optional[Dict[str, Any]] = None):
+def _log(stage: str, meta: Optional[Dict[str, Any]] = None, level: str = "INFO"):
+    """
+    Structured logging with levels.
+
+    Levels:
+        INFO: Normal operation flow
+        WARNING: Retriable failures, degraded state
+        ERROR: Non-retriable failures, dropped data
+    """
     print(
         json.dumps(
             {
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "level": level,
                 "stage": stage,
                 "meta": meta or {},
             },
@@ -33,12 +45,6 @@ class StreamListener:
     Real-time event listener with buffering and backpressure.
 
     Events flow: accept() → queue → buffer → flush → boundary.ingest()
-
-    Extension points (register callbacks for future modules):
-        - on_event: called when event arrives (drift-detection)
-        - on_pre_flush: called before batch ingestion
-        - on_post_flush: called after successful ingestion
-        - on_error: called when batch dropped after max retries
     """
 
     def __init__(
@@ -57,14 +63,6 @@ class StreamListener:
         self.max_retries = max_retries
         self._running = False
 
-        # Extension hooks (None by default, future modules register here)
-        self.on_event: Optional[Callable[[Dict[str, Any]], None]] = None
-        self.on_pre_flush: Optional[Callable[[List[Dict[str, Any]]], None]] = None
-        self.on_post_flush: Optional[Callable[[List[Dict[str, Any]]], None]] = None
-        self.on_error: Optional[Callable[[List[Dict[str, Any]], Exception], None]] = (
-            None
-        )
-
     async def accept(self, event: Dict[str, Any]):
         """
         Submit an event to the listener.
@@ -72,8 +70,6 @@ class StreamListener:
         Blocks if queue is full (backpressure).
         Any input source (WebSocket, HTTP, test code) calls this.
         """
-        if self.on_event:
-            self.on_event(event)
         await self.queue.put(event)
 
     def accept_nowait(self, event: Dict[str, Any]):
@@ -83,8 +79,6 @@ class StreamListener:
         Raises asyncio.QueueFull if queue is at capacity.
         Use for strict backpressure where blocking is not acceptable.
         """
-        if self.on_event:
-            self.on_event(event)
         self.queue.put_nowait(event)
 
     async def run(self):
@@ -129,35 +123,45 @@ class StreamListener:
         self._running = False
 
     async def _flush(self):
-        """Flush buffer to boundary with retry logic."""
+        """Flush buffer to boundary with retry logic and timing."""
         if not self.buffer:
             return
 
         batch = self.buffer
         self.buffer = []
 
-        if self.on_pre_flush:
-            self.on_pre_flush(batch)
-
         _log("stream_flush_attempt", {"count": len(batch)})
+        flush_start = time.monotonic()
 
         for attempt in range(1, self.max_retries + 2):  # +2 because range is exclusive
             try:
+                attempt_start = time.monotonic()
                 self.boundary.ingest(batch)
-                _log("stream_flush_success", {"count": len(batch), "attempt": attempt})
+                attempt_duration_ms = (time.monotonic() - attempt_start) * 1000
 
-                if self.on_post_flush:
-                    self.on_post_flush(batch)
+                total_duration_ms = (time.monotonic() - flush_start) * 1000
+                _log(
+                    "stream_flush_success",
+                    {
+                        "count": len(batch),
+                        "attempt": attempt,
+                        "duration_ms": round(total_duration_ms, 2),
+                        "attempt_duration_ms": round(attempt_duration_ms, 2),
+                    },
+                )
                 return
 
             except Exception as e:
+                attempt_duration_ms = (time.monotonic() - flush_start) * 1000
                 _log(
                     "stream_flush_failed",
                     {
                         "count": len(batch),
                         "attempt": attempt,
                         "error": type(e).__name__,
+                        "duration_ms": round(attempt_duration_ms, 2),
                     },
+                    level="WARNING",
                 )
 
                 if attempt <= self.max_retries:
@@ -165,10 +169,16 @@ class StreamListener:
                     continue
 
                 # Max retries exhausted - drop batch
-                _log("stream_batch_dropped", {"count": len(batch), "error": str(e)})
-
-                if self.on_error:
-                    self.on_error(batch, e)
+                total_duration_ms = (time.monotonic() - flush_start) * 1000
+                _log(
+                    "stream_batch_dropped",
+                    {
+                        "count": len(batch),
+                        "error": str(e),
+                        "total_duration_ms": round(total_duration_ms, 2),
+                    },
+                    level="ERROR",
+                )
 
 
 # --- Optional WebSocket Adapter ---
@@ -196,6 +206,14 @@ async def websocket_adapter(websocket, listener: StreamListener):
                 else:
                     await listener.accept(event)
             except json.JSONDecodeError:
-                _log("ws_invalid_json", {"raw": message[:100]})
+                _log(
+                    "ws_invalid_json",
+                    {"raw": message[:100]},
+                    level="WARNING",
+                )
     except Exception as e:
-        _log("ws_client_disconnected", {"reason": type(e).__name__})
+        _log(
+            "ws_client_disconnected",
+            {"reason": type(e).__name__},
+            level="WARNING",
+        )
