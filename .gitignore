@@ -3,3 +3,6 @@
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+Signal-Router-Service/
+router_skeleton_fastapi/
