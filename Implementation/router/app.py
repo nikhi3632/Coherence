@@ -8,7 +8,7 @@ Ingress router adapted from router_skeleton_fastapi. Implements analyze-first fl
 This is a minimal implementation focusing on control flow and contracts.
 """
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 import os
 from typing import Dict, Any
@@ -27,7 +27,7 @@ class IngestRequest(BaseModel):
     user_id: str | None = None
     payload_version: int = 1
     ts: str | None = None
-    payload: Dict[str, Any] = {}
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 @app.post("/ingest")
