@@ -6,3 +6,6 @@
 
 Signal-Router-Service/
 router_skeleton_fastapi/
+__pycache__/
+*.pyc
+
