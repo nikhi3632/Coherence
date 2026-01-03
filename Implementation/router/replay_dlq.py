@@ -7,6 +7,7 @@ import time
 import logging
 from sqlalchemy import text
 from typing import Any
+from .routing import pick_destination
 
 logger = logging.getLogger("implementation.replay")
 
@@ -23,7 +24,7 @@ async def replay_item(db, id_: int, log_id: str, payload_text: str) -> bool:
             await db.commit()
             return True
 
-        # Simple heuristic for kind
+        # Simple heuristic for kind (legacy)
         msg = json.dumps(payload).lower()
         kind = "assist"
         if any(k in msg for k in ["emergency", "urgent", "crisis"]):
@@ -31,11 +32,16 @@ async def replay_item(db, id_: int, log_id: str, payload_text: str) -> bool:
         elif any(k in msg for k in ["policy", "compliance"]):
             kind = "policy"
 
-        routed_agents = json.dumps(["Axis"])  # example
+        # Use centralized routing logic (now returns list and trace)
+        classification = payload.get("classification") or kind
+        coherence_score = payload.get("coherence_score")
+        destinations, decision_trace = pick_destination(classification, coherence_score)
+        routed_agents = json.dumps(destinations)
         response_obj = {"status": "replayed", "source": "dlq_replay"}
         metadata = {
             "replayed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "original_dlq_id": id_,
+            "decision_trace": decision_trace,
         }
 
         # Insert into logs using parameter binding and jsonb casts

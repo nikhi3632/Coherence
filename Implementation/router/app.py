@@ -15,6 +15,8 @@ from typing import Dict, Any
 
 from ..utils.canonical_hash import generate_canonical_message_id
 from ..utils.encryption import encrypt_payload
+from .dlq_store import persist_to_dlq
+from .routing import pick_destination
 
 app = FastAPI(title="Router - Implementation")
 
@@ -68,20 +70,35 @@ async def ingest(req: IngestRequest):
     classification = analysis["classification"]
     coherence = analysis["coherence_score"]
 
-    # Simplified routing decision
-    if classification == "invalid_signal":
-        # DLQ path
-        # Here we encrypt payload before storing in DLQ
+    # 使用 synthesis-aligned mapping
+    destinations, decision_trace = pick_destination(classification, analysis.get("coherence_score"), req.tenant_id)
+    if "DLQ" in destinations:
+        # DLQ path: encrypt and persist
         encrypted = encrypt_payload({"message_id": message_id, "payload": req.payload})
-        # In this minimal impl we just return DLQ status
-        return {"status": "dlq", "message_id": message_id}
+        dlq_path = persist_to_dlq(
+            encrypted,
+            {
+                "message_id": message_id,
+                "tenant_id": req.tenant_id,
+                "event_id": req.event_id,
+                "decision_trace": decision_trace,
+            },
+        )
+        return {
+            "status": "dlq_stored",
+            "message_id": message_id,
+            "dlq_path": dlq_path,
+            "classification": classification,
+            "coherence_score": coherence,
+            "decision_trace": decision_trace,
+        }
 
-    # Otherwise pretend to route to Axis agent
-    # Return the analysis along with routing decision
+    # 普通路由，支持多 agent
     return {
         "status": "routed",
         "message_id": message_id,
         "classification": classification,
         "coherence_score": coherence,
-        "routed_agents": ["Axis"],
+        "routed_agents": destinations,
+        "decision_trace": decision_trace,
     }

@@ -1,0 +1,9 @@
+{
+  "message_id": "bf5435a166dd7219835d3de232c2f2fe",
+  "tenant_id": "t1",
+  "event_id": null,
+  "decision_trace": [
+    "coherence_score=0.1",
+    "score<0.3 -> DLQ"
+  ]
+}
