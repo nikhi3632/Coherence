@@ -9,3 +9,5 @@ router_skeleton_fastapi/
 __pycache__/
 *.pyc
 
+Implementation/router/dlq/
+
